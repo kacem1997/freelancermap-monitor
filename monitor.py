@@ -1,16 +1,13 @@
 """
 freelancermap.de Projekt-Monitor
-Fetcht neue Projekte und sendet E-Mail-Benachrichtigung.
+Fetcht neue Projekte und sendet Push-Notifications via ntfy.sh.
 """
 
 import json
 import os
 import re
-import smtplib
 import sys
 from datetime import datetime
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 
 import requests
 from bs4 import BeautifulSoup
@@ -32,7 +29,11 @@ SEARCH_URL = (
 
 SEEN_FILE = "seen_postings.json"
 
-HEADERS = {
+# Bis zu dieser Anzahl: eine Notification pro Posting (direkt antippbar)
+# Darüber: eine Sammel-Notification
+INDIVIDUAL_THRESHOLD = 5
+
+FETCH_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -48,7 +49,7 @@ HEADERS = {
 # ---------------------------------------------------------------------------
 
 def fetch_html() -> str:
-    resp = requests.get(SEARCH_URL, headers=HEADERS, timeout=30)
+    resp = requests.get(SEARCH_URL, headers=FETCH_HEADERS, timeout=30)
     resp.raise_for_status()
     return resp.text
 
@@ -102,68 +103,48 @@ def save_seen(seen: set[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# E-Mail
+# ntfy.sh Notifications
 # ---------------------------------------------------------------------------
 
-def build_html(postings: list[dict]) -> str:
-    rows = "".join(
-        f'<tr>'
-        f'<td style="padding:10px 4px;border-bottom:1px solid #f0f0f0;font-size:14px;">'
-        f'<a href="{p["url"]}" style="color:#1a73e8;text-decoration:none;font-weight:500;">'
-        f'{p["title"]}'
-        f'</a>'
-        f'</td>'
-        f'</tr>'
-        for p in postings
-    )
-    return f"""
-    <html>
-    <body style="font-family:Arial,sans-serif;color:#333;max-width:600px;margin:0 auto;padding:20px;">
-      <h2 style="color:#1a73e8;margin-bottom:4px;">
-        🔔 {len(postings)} neue Projekt{'e' if len(postings) != 1 else ''} auf freelancermap.de
-      </h2>
-      <p style="color:#666;font-size:13px;margin-top:0;">
-        {datetime.utcnow().strftime('%d.%m.%Y %H:%M')} UTC
-      </p>
-      <table style="width:100%;border-collapse:collapse;margin-top:16px;">
-        {rows}
-      </table>
-      <div style="margin-top:20px;padding-top:16px;border-top:1px solid #eee;">
-        <a href="https://www.freelancermap.de/projekte"
-           style="background:#1a73e8;color:#fff;padding:10px 20px;
-                  border-radius:4px;text-decoration:none;font-size:13px;">
-          Alle Projekte ansehen →
-        </a>
-      </div>
-      <p style="color:#bbb;font-size:11px;margin-top:20px;">
-        Automatisch generiert via GitHub Actions
-      </p>
-    </body>
-    </html>
-    """
+def ntfy_post(topic: str, title: str, body: str, click_url: str) -> None:
+    """Sendet eine Push-Notification via ntfy.sh."""
+    requests.post(
+        f"https://ntfy.sh/{topic}",
+        json={
+            "topic": topic,
+            "title": title,
+            "message": body,
+            "click": click_url,
+            "tags": ["briefcase"],
+            "priority": 3,
+        },
+        timeout=15,
+    ).raise_for_status()
 
 
-def send_email(postings: list[dict]) -> None:
-    smtp_user = os.environ["SMTP_USER"]
-    smtp_pass = os.environ["SMTP_PASSWORD"]
-    recipient = os.environ.get("RECIPIENT_EMAIL", smtp_user)
-    smtp_host = os.environ.get("SMTP_HOST", "smtp-mail.outlook.com")
-    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
-
-    count = len(postings)
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"🔔 {count} neue Freelancermap-Projekt{'e' if count != 1 else ''}"
-    msg["From"] = smtp_user
-    msg["To"] = recipient
-    msg.attach(MIMEText(build_html(postings), "html", "utf-8"))
-
-    with smtplib.SMTP(smtp_host, smtp_port) as server:
-        server.ehlo()
-        server.starttls()
-        server.login(smtp_user, smtp_pass)
-        server.sendmail(smtp_user, recipient, msg.as_string())
-
-    print(f"✅ E-Mail gesendet an {recipient} — {count} neue Projekte")
+def send_notifications(postings: list[dict], topic: str) -> None:
+    if len(postings) <= INDIVIDUAL_THRESHOLD:
+        # Eine Notification pro Posting — direkt antippbar
+        for p in postings:
+            ntfy_post(
+                topic=topic,
+                title=p["title"],
+                body="Neues Projekt auf freelancermap.de — antippen zum Öffnen",
+                click_url=p["url"],
+            )
+            print(f"  🔔 Notification: {p['title']}")
+    else:
+        # Sammel-Notification bei vielen neuen Postings
+        body = "\n".join(f"• {p['title']}" for p in postings[:10])
+        if len(postings) > 10:
+            body += f"\n… und {len(postings) - 10} weitere"
+        ntfy_post(
+            topic=topic,
+            title=f"🔔 {len(postings)} neue Projekte auf freelancermap.de",
+            body=body,
+            click_url=SEARCH_URL,
+        )
+        print(f"  🔔 Sammel-Notification: {len(postings)} neue Projekte")
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +155,11 @@ def main() -> None:
     ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     print(f"[{ts}] Starte freelancermap-Monitor...")
 
-    # Seite abrufen
+    ntfy_topic = os.environ.get("NTFY_TOPIC")
+    if not ntfy_topic:
+        print("❌ NTFY_TOPIC nicht gesetzt.", file=sys.stderr)
+        sys.exit(1)
+
     try:
         html = fetch_html()
     except Exception as e:
@@ -186,19 +171,16 @@ def main() -> None:
 
     seen = load_seen()
     is_first_run = len(seen) == 0
-
     new_postings = [p for p in postings if p["id"] not in seen]
 
     if is_first_run:
-        # Erster Lauf: Seen-Liste befüllen ohne E-Mail zu senden
-        print(f"  Erster Lauf — {len(postings)} Projekte als gesehen markiert, keine E-Mail.")
+        print(f"  Erster Lauf — {len(postings)} Projekte als gesehen markiert, keine Notification.")
     elif new_postings:
-        print(f"  {len(new_postings)} neue Projekte gefunden!")
-        send_email(new_postings)
+        print(f"  {len(new_postings)} neue Projekte!")
+        send_notifications(new_postings, ntfy_topic)
     else:
         print("  Keine neuen Projekte.")
 
-    # Seen-Liste aktualisieren
     for p in postings:
         seen.add(p["id"])
     save_seen(seen)

@@ -2,10 +2,7 @@ name: Freelancermap Monitor
 
 on:
   schedule:
-    # Alle 5 Minuten (GitHub garantiert keine Minutengenauigkeit,
-    # in der Praxis läuft es 5–15 Minuten nach dem Schedule)
     - cron: "*/5 * * * *"
-  # Manuell auslösbar zum Testen
   workflow_dispatch:
 
 permissions:
@@ -29,11 +26,7 @@ jobs:
 
       - name: Monitor ausführen
         env:
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: python monitor.py
 
       - name: Seen-Liste committen
@@ -41,6 +34,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add seen_postings.json
-          # Nur committen wenn sich die Datei geändert hat (= neue Projekte gefunden)
           git diff --staged --quiet || git commit -m "chore: update seen postings [skip ci]"
           git push
