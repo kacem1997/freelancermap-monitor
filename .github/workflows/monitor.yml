@@ -38,9 +38,11 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git stash
-          git pull --rebase origin main
-          git stash pop
           git add seen_postings.json
-          git diff --staged --quiet || git commit -m "chore: update seen postings [skip ci]"
-          git push
+          if git diff --staged --quiet; then
+            echo "Keine Änderungen – kein Commit nötig."
+          else
+            git commit -m "chore: update seen postings [skip ci]"
+            git pull --rebase origin main
+            git push
+          fi
